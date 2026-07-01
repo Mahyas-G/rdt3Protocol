@@ -39,10 +39,10 @@ def parse_pkt(raw: bytes) -> dict:
     payload = raw[HEADER_SIZE:]
     return {"sequence": seq, "checksum": chk, "payload": payload}
 
-def is_corrupt(pkt_dict: dict) -> bool:
-    seq_bytes = struct.pack("!H", pkt_dict["sequence"])
-    expected = crc16(seq_bytes + pkt_dict["payload"])
-    return expected != pkt_dict["checksum"]
+def is_corrupt(rcvpkt: dict) -> bool:
+    seq_bytes = struct.pack("!H", rcvpkt["sequence"])
+    expected = crc16(seq_bytes + rcvpkt["payload"])
+    return expected != rcvpkt["checksum"]
 
 class Timer:
     def __init__(self, timeout_ms: float, callback):
@@ -57,7 +57,6 @@ class Timer:
             self._timer = threading.Timer(self.timeout_ms / 1000.0, self._timer_trigger)
             self._timer.daemon = True
             self._timer.start()
-        log.debug(f"Timer started: {self.timeout_ms} ms")
 
     def stop(self):
         with self._lock:
@@ -85,7 +84,7 @@ class UnreliableChannel:
 
     def send_udt(self, packet: bytes, to_sender=False):
         if random.random() < self.loss_prob:
-            log.warning("Packet dropped by channel!")
+            log.warning("Channel: Packet dropped!")
             return
 
         if random.random() < self.corrupt_prob:
@@ -94,7 +93,7 @@ class UnreliableChannel:
                 idx = random.randint(0, len(pkt_arr) - 1)
                 pkt_arr[idx] ^= 0xFF
             packet = bytes(pkt_arr)
-            log.warning("Packet corrupted by channel!")
+            log.warning("Channel: Packet corrupted!")
 
         with self._lock:
             if to_sender:
@@ -118,30 +117,30 @@ class RDT3Receiver:
         self.expected_seq = 0
 
     def deliver_data(self, data: bytes):
-        log.info(f"Data delivered to application layer: {data}")
+        log.info(f"Application Layer Received: {data}")
 
     def process_incoming(self):
         while True:
             raw = self.channel.rdt_rcv(from_sender=False)
             if raw is None:
                 break
-
-            pkt = parse_pkt(raw)
-            if is_corrupt(pkt):
-                log.warning("Receiver detected corruption. Resending previous ACK.")
+            
+            rcvpkt = parse_pkt(raw)
+            if is_corrupt(rcvpkt):
+                log.warning("Receiver: Corrupt packet detected. Sending previous ACK.")
                 ack_pkt = make_pkt(1 - self.expected_seq, b"")
                 self.channel.send_udt(ack_pkt, to_sender=True)
                 continue
 
-            if pkt["sequence"] == self.expected_seq:
-                payload = pkt["payload"].rstrip(b'\x00')
+            if rcvpkt["sequence"] == self.expected_seq:
+                payload = rcvpkt["payload"].rstrip(b'\x00')
                 self.deliver_data(payload)
                 ack_pkt = make_pkt(self.expected_seq, b"")
-                log.info(f"Receiver sending ACK {self.expected_seq}")
+                log.info(f"Receiver: Sending ACK {self.expected_seq}")
                 self.channel.send_udt(ack_pkt, to_sender=True)
                 self.expected_seq = 1 - self.expected_seq
             else:
-                log.warning(f"Receiver got unexpected seq {pkt['sequence']}. Resending ACK {1 - self.expected_seq}")
+                log.warning(f"Receiver: Unexpected sequence. Resending ACK {1 - self.expected_seq}")
                 ack_pkt = make_pkt(1 - self.expected_seq, b"")
                 self.channel.send_udt(ack_pkt, to_sender=True)
 
@@ -152,23 +151,32 @@ class RDT3Sender:
         self.sndpkt = None
         self.timeout_occurred = False
         self.timer = Timer(timeout_ms, self._on_timeout)
-        self.stats = {"sent": 0, "retransmit": 0, "ack_received": 0, "corrupt_ack": 0, "timeouts": 0}
+        self.stats = {
+            "sent": 0,
+            "retransmit": 0,
+            "ack_received": 0,
+            "corrupt_ack": 0,
+            "timeouts": 0
+        }
 
     def _on_timeout(self):
         self.timeout_occurred = True
         self.stats["timeouts"] += 1
 
+    def send_udt(self, packet: bytes):
+        self.channel.send_udt(packet, to_sender=False)
+
     def send_rdt(self, data: bytes):
         if self.state == "WAIT_CALL_0":
             self.sndpkt = make_pkt(0, data)
-            self.channel.send_udt(self.sndpkt, to_sender=False)
+            self.send_udt(self.sndpkt)
             self.timer.start()
             self.stats["sent"] += 1
             self.state = "WAIT_ACK_0"
             self._wait_for_ack(0, "WAIT_CALL_1")
         elif self.state == "WAIT_CALL_1":
             self.sndpkt = make_pkt(1, data)
-            self.channel.send_udt(self.sndpkt, to_sender=False)
+            self.send_udt(self.sndpkt)
             self.timer.start()
             self.stats["sent"] += 1
             self.state = "WAIT_ACK_1"
@@ -178,9 +186,9 @@ class RDT3Sender:
         self.timeout_occurred = False
         while True:
             if self.timeout_occurred:
-                log.warning(f"Timeout! Resending packet seq={expected_seq}")
+                log.warning(f"Sender: Timeout! Resending packet seq={expected_seq}")
                 self.timeout_occurred = False
-                self.channel.send_udt(self.sndpkt, to_sender=False)
+                self.send_udt(self.sndpkt)
                 self.timer.start()
                 self.stats["retransmit"] += 1
                 continue
@@ -190,20 +198,20 @@ class RDT3Sender:
                 time.sleep(0.01)
                 continue
 
-            pkt = parse_pkt(raw)
-            if is_corrupt(pkt):
-                log.warning("Sender received corrupt ACK. Ignoring.")
+            rcvpkt = parse_pkt(raw)
+            if is_corrupt(rcvpkt):
+                log.warning("Sender: Received corrupt ACK. Ignoring.")
                 self.stats["corrupt_ack"] += 1
                 continue
 
-            if pkt["sequence"] == expected_seq:
+            if rcvpkt["sequence"] == expected_seq:
                 self.timer.stop()
                 self.stats["ack_received"] += 1
                 self.state = next_state
-                log.info(f"ACK {expected_seq} received. State -> {self.state}")
+                log.info(f"Sender: ACK {expected_seq} received. State -> {self.state}")
                 break
             else:
-                log.warning(f"Sender received wrong ACK seq={pkt['sequence']}. Ignoring.")
+                log.warning(f"Sender: Received wrong ACK seq={rcvpkt['sequence']}. Ignoring.")
                 continue
 
     def print_stats(self):

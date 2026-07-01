@@ -1,5 +1,6 @@
 import time
 import unittest
+import threading
 from rdt3 import (
     pad_to_multiple_of_16, crc16, make_pkt, parse_pkt,
     is_corrupt, Timer, UnreliableChannel, RDT3Sender, RDT3Receiver
@@ -40,14 +41,20 @@ class TestNetworkConditions(unittest.TestCase):
         channel = UnreliableChannel(loss_prob=1.0, corrupt_prob=0.0)
         receiver = RDT3Receiver(channel)
         channel.set_receiver(receiver)
-        sender = RDT3Sender(channel, timeout_ms=100)
+        sender = RDT3Sender(channel, timeout_ms=50)
+
+        def run_sender():
+            sender.send_rdt(b"timeout_test")
+
+        t = threading.Thread(target=run_sender)
+        t.daemon = True
+        t.start()
+
+        time.sleep(0.15)
         
-        sender.sndpkt = make_pkt(0, b"test")
-        sender.state = "WAIT_ACK_0"
-        sender.timer.start()
-        
-        time.sleep(0.3)
-        self.assertTrue(sender.timeout_occurred)
+        self.assertGreater(sender.stats["timeouts"], 0)
+        self.assertGreater(sender.stats["retransmit"], 0)
+        sender.timer.stop()
 
     def test_corrupt_ack(self):
         channel = UnreliableChannel(loss_prob=0.0, corrupt_prob=0.0)
@@ -61,6 +68,31 @@ class TestNetworkConditions(unittest.TestCase):
         
         raw = channel.rdt_rcv(from_sender=True)
         self.assertTrue(is_corrupt(parse_pkt(raw)))
+
+class TestFSM(unittest.TestCase):
+    def test_ideal_channel(self):
+        channel = UnreliableChannel(loss_prob=0.0, corrupt_prob=0.0)
+        receiver = RDT3Receiver(channel)
+        channel.set_receiver(receiver)
+        sender = RDT3Sender(channel, timeout_ms=300)
+        
+        for msg in [b"Hello", b"World", b"Test!"]:
+            sender.send_rdt(msg)
+            
+        self.assertEqual(sender.stats["retransmit"], 0)
+        self.assertEqual(sender.stats["ack_received"], 3)
+
+    def test_sequence_alternates(self):
+        channel = UnreliableChannel(0.0, 0.0)
+        receiver = RDT3Receiver(channel)
+        channel.set_receiver(receiver)
+        sender = RDT3Sender(channel, timeout_ms=300)
+
+        self.assertEqual(sender.state, "WAIT_CALL_0")
+        sender.send_rdt(b"msg1")
+        self.assertEqual(sender.state, "WAIT_CALL_1")
+        sender.send_rdt(b"msg2")
+        self.assertEqual(sender.state, "WAIT_CALL_0")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
