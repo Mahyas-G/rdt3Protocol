@@ -4,19 +4,22 @@ import time
 import random
 import logging
 
+# Configure logging to monitor packet transitions and errors
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("rdt3")
 
-HEADER_FORMAT = "!HH"
+HEADER_FORMAT = "!HH"  # 16-bit sequence number and 16-bit checksum
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 
 def pad_to_multiple_of_16(data: bytes) -> bytes:
+    # Ensure payload length is even (multiple of 16 bits) as specified in requirements
     remainder = len(data) % 2
     if remainder != 0:
         data += b'\x00'
     return data
 
 def crc16(data: bytes) -> int:
+    # Standard CRC-16-CCITT implementation for error detection
     crc = 0xFFFF
     for byte in data:
         crc ^= byte << 8
@@ -29,22 +32,26 @@ def crc16(data: bytes) -> int:
     return crc
 
 def make_pkt(seq: int, data: bytes) -> bytes:
+    # Build a complete RDT packet with header (seq, checksum) and padded payload
     payload = pad_to_multiple_of_16(data)
     seq_bytes = struct.pack("!H", seq)
     checksum = crc16(seq_bytes + payload)
     return struct.pack(HEADER_FORMAT, seq, checksum) + payload
 
 def parse_pkt(raw: bytes) -> dict:
+    # Extract sequence, checksum, and payload from raw bytes
     seq, chk = struct.unpack_from(HEADER_FORMAT, raw, 0)
     payload = raw[HEADER_SIZE:]
     return {"sequence": seq, "checksum": chk, "payload": payload}
 
 def is_corrupt(rcvpkt: dict) -> bool:
+    # Verify if the packet has been modified by recalculating the CRC
     seq_bytes = struct.pack("!H", rcvpkt["sequence"])
     expected = crc16(seq_bytes + rcvpkt["payload"])
     return expected != rcvpkt["checksum"]
 
 class Timer:
+    # A thread-safe millisecond timer wrapper using threading.Timer
     def __init__(self, timeout_ms: float, callback):
         self.timeout_ms = timeout_ms
         self.callback = callback
@@ -71,6 +78,7 @@ class Timer:
         self.callback()
 
 class UnreliableChannel:
+    # Simulates a physical network layer with potential packet loss and corruption
     def __init__(self, loss_prob=0.1, corrupt_prob=0.1):
         self.loss_prob = loss_prob
         self.corrupt_prob = corrupt_prob
@@ -83,10 +91,12 @@ class UnreliableChannel:
         self.receiver = receiver
 
     def send_udt(self, packet: bytes, to_sender=False):
+        # Introduce random packet loss
         if random.random() < self.loss_prob:
             log.warning("Channel: Packet dropped!")
             return
 
+        # Introduce random bit corruption
         if random.random() < self.corrupt_prob:
             pkt_arr = bytearray(packet)
             if len(pkt_arr) > 0:
@@ -104,7 +114,8 @@ class UnreliableChannel:
         if not to_sender and self.receiver:
             self.receiver.process_incoming()
 
-    def rdt_rcv(self, from_sender=False) -> bytes | None:
+    def rcv_rdt(self, from_sender=False) -> bytes | None:
+        # Retrieve the next available packet from the channel buffer
         with self._lock:
             buffer = self.sender_buffer if from_sender else self.receiver_buffer
             if buffer:
@@ -112,29 +123,33 @@ class UnreliableChannel:
         return None
 
 class RDT3Receiver:
+    # Implements the RDT 3.0 Receiver FSM side
     def __init__(self, channel: UnreliableChannel):
         self.channel = channel
         self.expected_seq = 0
 
-    def deliver_data(self, data: bytes):
+    def data_deliver(self, data: bytes):
         log.info(f"Application Layer Received: {data}")
 
     def process_incoming(self):
+        # Process packets arriving from the unreliable network channel
         while True:
-            raw = self.channel.rdt_rcv(from_sender=False)
+            raw = self.channel.rcv_rdt(from_sender=False)
             if raw is None:
                 break
             
             rcvpkt = parse_pkt(raw)
+            # Handle corrupt packets by resending the last valid ACK
             if is_corrupt(rcvpkt):
                 log.warning("Receiver: Corrupt packet detected. Sending previous ACK.")
                 ack_pkt = make_pkt(1 - self.expected_seq, b"")
                 self.channel.send_udt(ack_pkt, to_sender=True)
                 continue
 
+            # Handle duplicate or correct sequence number packets
             if rcvpkt["sequence"] == self.expected_seq:
                 payload = rcvpkt["payload"].rstrip(b'\x00')
-                self.deliver_data(payload)
+                self.data_deliver(payload)
                 ack_pkt = make_pkt(self.expected_seq, b"")
                 log.info(f"Receiver: Sending ACK {self.expected_seq}")
                 self.channel.send_udt(ack_pkt, to_sender=True)
@@ -145,6 +160,7 @@ class RDT3Receiver:
                 self.channel.send_udt(ack_pkt, to_sender=True)
 
 class RDT3Sender:
+    # Implements the Stop-and-Wait RDT 3.0 Sender FSM side
     def __init__(self, channel: UnreliableChannel, timeout_ms=500):
         self.channel = channel
         self.state = "WAIT_CALL_0"
@@ -167,6 +183,7 @@ class RDT3Sender:
         self.channel.send_udt(packet, to_sender=False)
 
     def send_rdt(self, data: bytes):
+        # Manage states according to the RDT 3.0 protocol definition
         if self.state == "WAIT_CALL_0":
             self.sndpkt = make_pkt(0, data)
             self.send_udt(self.sndpkt)
@@ -183,6 +200,7 @@ class RDT3Sender:
             self._wait_for_ack(1, "WAIT_CALL_0")
 
     def _wait_for_ack(self, expected_seq: int, next_state: str):
+        # Wait loop for a valid ACK or a timeout trigger
         self.timeout_occurred = False
         while True:
             if self.timeout_occurred:
@@ -193,7 +211,7 @@ class RDT3Sender:
                 self.stats["retransmit"] += 1
                 continue
 
-            raw = self.channel.rdt_rcv(from_sender=True)
+            raw = self.channel.rcv_rdt(from_sender=True)
             if raw is None:
                 time.sleep(0.01)
                 continue
@@ -215,6 +233,7 @@ class RDT3Sender:
                 continue
 
     def print_stats(self):
+        # Display performance statistics of the current transmission
         print("\n" + "=" * 45)
         print("       RDT 3.0 Sender Statistics")
         print("=" * 45)

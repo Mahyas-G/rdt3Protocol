@@ -1,77 +1,52 @@
-# RDT 3.0 Protocol Implementation Project
+# Reliable Data Transfer (RDT 3.0) Simulation
 
-## Introduction
-Implementation of the Finite State Machine (FSM) for both sender and receiver of the Reliable Data Transfer (RDT) 3.0 protocol in Python.
-
----
-
-## Requirements
-- Python 3.10+
-- Modules (All from Python Standard Library):
-  - `struct`
-  - `threading`
-  - `random`
-  - `logging`
-  - `time`
-  - `unittest`
-
----
+A clean, thread-safe Python implementation of the **RDT 3.0 (Stop-and-Wait)** protocol operating over an unreliable network layer. This project simulates packet transmission, bit corruption, packet loss, timeout handling, and automatic retransmissions using a standard CRC-16 checksum algorithm.
 
 ## Project Structure
-```text
-rdt3_project/
-│
-├── rdt3.py
-├── main.py
-├── test_rdt3.py
-├── README.md
-└── messages.json
 
-```
+The project consists of three core Python files:
+* **`rdt3.py`**: The core implementation containing the `RDT3Sender` and `RDT3Receiver` Finite State Machines (FSMs), the `Timer` utility, the `UnreliableChannel` simulation, and helper functions for CRC-16 error-detection and 16-bit word alignment padding.
+* **`main.py`**: An automated test harness that runs multiple network simulation scenarios (Ideal Channel, 20% Packet Loss, 20% Packet Corruption, and Mixed Conditions) to measure channel performance and efficiency.
+* **`test_rdt3.py`**: A robust unit-testing suite covering bit-level validation, packet padding, FSM transitions, and behavior under simulated packet losses/corruptions.
 
----
 
-## FSM Architecture
+## Requirements
 
-### Sender FSM (4 States)
-
-| Current State | Event | Action | Next State |
-| --- | --- | --- | --- |
-| `WAIT_CALL_0` | Data from app layer | Make sndpkt 0, Send, Start Timer | `WAIT_ACK_0` |
-| `WAIT_ACK_0` | Corrupt ACK OR ACK 1 | Ignore | `WAIT_ACK_0` |
-| `WAIT_ACK_0` | Timeout | Resend sndpkt 0, Restart Timer | `WAIT_ACK_0` |
-| `WAIT_ACK_0` | Receive valid ACK 0 | Stop Timer | `WAIT_CALL_1` |
-| `WAIT_CALL_1` | Data from app layer | Make sndpkt 1, Send, Start Timer | `WAIT_ACK_1` |
-| `WAIT_ACK_1` | Corrupt ACK OR ACK 0 | Ignore | `WAIT_ACK_1` |
-| `WAIT_ACK_1` | Timeout | Resend sndpkt 1, Restart Timer | `WAIT_ACK_1` |
-| `WAIT_ACK_1` | Receive valid ACK 1 | Stop Timer | `WAIT_CALL_0` |
-
-### Receiver FSM (2 States)
-
-| Expected Seq | Event | Action | Next State |
-| --- | --- | --- | --- |
-| `0` | Receive valid rcvpkt 0 | Extract payload, `deliver_data()`, Send ACK 0 | `1` |
-| `0` | Corrupt rcvpkt OR rcvpkt 1 | Send ACK 1 | `0` |
-| `1` | Receive valid rcvpkt 1 | Extract payload, `deliver_data()`, Send ACK 1 | `0` |
-| `1` | Corrupt rcvpkt OR rcvpkt 0 | Send ACK 0 | `1` |
-
----
-
-## Packet Structure
-
-```text
-Header (32 bits)
-Sequence: 16 bits
-Checksum: 16 bits
-Payload: variable length padded to multiple of 16 bits
-
-```
+* **Python 3.8 or higher**
+* No external packages or dependencies are required; the project relies entirely on Python's built-in `struct`, `threading`, `time`, `random`, and `unittest` modules.
 
 ## How to Run
 
+### 1. Running the Main Simulation
+
+To run the automated scenarios and view performance statistics (such as packet loss recoveries, timeout frequencies, and overall channel efficiency metrics), execute:
+
 ```bash
 python main.py
+
+```
+
+### 2. Running Unit Tests
+
+To verify individual structural layers, state transitions, integrity checks, and thread safety across the protocol framework, run the testing module:
+
+```bash
+python test_rdt3.py
+
+```
+
+Alternatively, you can run it via the standard unittest CLI:
+
+```bash
 python -m unittest test_rdt3.py -v
 
 ```
 
+## Simulation Scenarios Explained
+
+When executing `main.py`, the simulation steps through four major network environments:
+
+1. **Ideal Channel:** Proves protocol behavior when zero drops or modifications occur.
+2. **Packet Loss (20%):** Tests the sender's millisecond-based countdown timer and automatic retransmission triggers.
+3. **Corruption (20%):** Evaluates the CRC-16 error-detection mechanism where the receiver silently drops corrupt packets, forcing a sender timeout and subsequent recovery.
+4. **Mixed Loss & Corruption (15% each):** Validates the full structural robustness of the stop-and-wait FSM under complex, unpredictable transmission faults.

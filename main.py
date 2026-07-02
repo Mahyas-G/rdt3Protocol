@@ -1,9 +1,9 @@
-import json
 import time
 import logging
 from rdt3 import RDT3Sender, UnreliableChannel, RDT3Receiver
 
 def run_scenario(name: str, loss: float, corrupt: float, messages: list, timeout_ms=500):
+    # Run a complete transmission test under a specific network scenario
     print("\n" + "#" * 50)
     print(f"  Scenario: {name}")
     print(f"  loss={loss*100:.0f}%  corrupt={corrupt*100:.0f}%  timeout={timeout_ms}ms")
@@ -24,11 +24,14 @@ def run_scenario(name: str, loss: float, corrupt: float, messages: list, timeout
     sender.print_stats()
 
 def main():
-    try:
-        with open("messages.json", "r", encoding="utf-8") as f:
-            msgs = json.load(f)["messages"]
-    except Exception:
-        msgs = ["Default Message 1", "Default Message 2"]
+    # Execution entry point testing perfect, lossy, and corrupted environments
+    msgs = [
+        "Hello rdt!",
+        "Network CN",
+        "Project 4",
+        "Stop Wait",
+        "CRC16 OK!"
+    ]
 
     run_scenario("Ideal Channel (No errors)", 0.0, 0.0, msgs)
     run_scenario("Packet Loss 20%", 0.2, 0.0, msgs)
